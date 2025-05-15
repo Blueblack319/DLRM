@@ -264,7 +264,9 @@ class DLRM_Net(nn.Module):
                     mode="sum",
                     sparse=True,
                 )
-            elif self.md_flag and n > self.md_threshold:
+            # [x] YJH
+            # elif self.md_flag and n > self.md_threshold:
+            elif self.md_flag:
                 base = max(m)
                 _m = m[i] if n > self.md_threshold else base
                 EE = PrEmbeddingBag(n, _m, base)
@@ -538,8 +540,10 @@ class DLRM_Net(nn.Module):
                 "ERROR: batch_size %d can not split across %d ranks evenly"
                 % (batch_size, ext_dist.my_size)
             )
-
+        # [x] Input slicing => Data Parallelism
         dense_x = dense_x[ext_dist.get_my_slice(batch_size)]
+
+        # [x] Local sparse split => Model Parallelism
         lS_o = lS_o[self.local_emb_slice]
         lS_i = lS_i[self.local_emb_slice]
 
@@ -548,6 +552,7 @@ class DLRM_Net(nn.Module):
                 "ERROR: corrupted model input detected in distributed_forward call"
             )
 
+        # [x] Embedding Lookup
         # embeddings
         with record_function("DLRM embedding forward"):
             ly = self.apply_emb(lS_o, lS_i, self.emb_l, self.v_W_l)
@@ -560,18 +565,22 @@ class DLRM_Net(nn.Module):
         if len(self.emb_l) != len(ly):
             sys.exit("ERROR: corrupted intermediate result in distributed_forward call")
 
+        # [x] all-to-all shuffle
         a2a_req = ext_dist.alltoall(ly, self.n_emb_per_rank)
 
+        # [x] Bottom MLP
         with record_function("DLRM bottom nlp forward"):
             x = self.apply_mlp(dense_x, self.bot_l)
 
         ly = a2a_req.wait()
         ly = list(ly)
 
+        # [x] Feature Interaction
         # interactions
         with record_function("DLRM interaction forward"):
             z = self.interact_features(x, ly)
 
+        # [x] Top MLP
         # top mlp
         with record_function("DLRM top nlp forward"):
             p = self.apply_mlp(z, self.top_l)
@@ -614,11 +623,14 @@ class DLRM_Net(nn.Module):
     def parallel_forward(self, dense_x, lS_o, lS_i):
         ### prepare model (overwrite) ###
         # WARNING: # of devices must be >= batch size in parallel_forward call
+        # [x] Device Selection
         batch_size = dense_x.size()[0]
         ndevices = min(self.ndevices, batch_size, len(self.emb_l))
         device_ids = range(ndevices)
+        ###
         # WARNING: must redistribute the model if mini-batch size changes(this is common
         # for last mini-batch, when # of elements in the dataset/batch size is not even
+        # [x] (Re)deploy model if needed
         if self.parallel_model_batch_size != batch_size:
             self.parallel_model_is_not_prepared = True
 
@@ -647,12 +659,18 @@ class DLRM_Net(nn.Module):
             else:
                 self.v_W_l = w_list
             self.parallel_model_is_not_prepared = False
+        ###
 
         ### prepare input (overwrite) ###
-        # scatter dense features (data parallelism)
+        # [x] scatter dense features (data parallelism) => Data Parallelism: Params duplicated / Inputs scattered
         # print(dense_x.device)
         dense_x = scatter(dense_x, device_ids, dim=0)
-        # distribute sparse features (model parallelism)
+        ### 
+
+        # [x] distribute sparse features (model parallelism) => Model Parallelism: Params sharded / Inputs duplicated
+        # YJH: Embedding tables are already distributed across devices. 
+        # Distribute the index/offset tensors for each categorical feature to the GPU that owns that particular embedding table.
+        # For each table k, its lS_o[k] & lS_i[k] are moved to the same device that now owns table k.
         if (len(self.emb_l) != len(lS_o)) or (len(self.emb_l) != len(lS_i)):
             sys.exit("ERROR: corrupted model input detected in parallel_forward call")
 
@@ -664,9 +682,10 @@ class DLRM_Net(nn.Module):
             i_list.append(lS_i[k].to(d))
         lS_o = t_list
         lS_i = i_list
+        ###
 
         ### compute results in parallel ###
-        # bottom mlp
+        # [x] bottom mlp
         # WARNING: Note that the self.bot_l is a list of bottom mlp modules
         # that have been replicated across devices, while dense_x is a tuple of dense
         # inputs that has been scattered across devices on the first (batch) dimension.
@@ -676,12 +695,12 @@ class DLRM_Net(nn.Module):
         # debug prints
         # print(x)
 
-        # embeddings
+        # [x] embeddings
         ly = self.apply_emb(lS_o, lS_i, self.emb_l, self.v_W_l)
         # debug prints
         # print(ly)
 
-        # butterfly shuffle (implemented inefficiently for now)
+        # [x] butterfly shuffle (implemented inefficiently for now)
         # WARNING: Note that at this point we have the result of the embedding lookup
         # for the entire batch on each device. We would like to obtain partial results
         # corresponding to all embedding lookups, but part of the batch on each device.
@@ -700,7 +719,7 @@ class DLRM_Net(nn.Module):
         # debug prints
         # print(ly)
 
-        # interactions
+        # [x] interactions
         z = []
         for k in range(ndevices):
             zk = self.interact_features(x[k], ly[k])
@@ -708,7 +727,7 @@ class DLRM_Net(nn.Module):
         # debug prints
         # print(z)
 
-        # top mlp
+        # [x] top mlp
         # WARNING: Note that the self.top_l is a list of top mlp modules that
         # have been replicated across devices, while z is a list of interaction results
         # that by construction are scattered across devices on the first (batch) dim.
@@ -716,7 +735,7 @@ class DLRM_Net(nn.Module):
         # distribution of z.
         p = parallel_apply(self.top_l_replicas, z, None, device_ids)
 
-        ### gather the distributed results ###
+        ### [x] gather the distributed results ###
         p0 = gather(p, self.output_d, dim=0)
 
         # clamp output if needed
@@ -989,7 +1008,8 @@ def run():
     # gpu
     parser.add_argument("--use-gpu", action="store_true", default=False)
     # distributed
-    parser.add_argument("--local_rank", type=int, default=-1)
+    # [x] YJH
+    parser.add_argument("--local-rank", type=int, default=-1)
     parser.add_argument("--dist-backend", type=str, default="")
     # debugging and profiling
     parser.add_argument("--print-freq", type=int, default=1)
@@ -1366,6 +1386,8 @@ def run():
                 },
             ]
         )
+        # [ ] YJH
+        print(parameters)
         optimizer = opts[args.optimizer](parameters, lr=args.learning_rate)
         lr_scheduler = LRPolicyScheduler(
             optimizer,

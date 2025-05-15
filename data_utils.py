@@ -1019,7 +1019,9 @@ def getCriteoAdData(
                     )
                 else:
                     X_cat[i] = np.array(
-                        list(map(lambda x: int(x, 16), line[14:])), dtype=np.int32
+                        # [X] YJH
+                        # list(map(lambda x: int(x, 16), line[14:])), dtype=np.int32
+                        list(map(lambda x: int(x, 16), line[14:])), dtype=np.int64
                     )
 
                 # count uniques
