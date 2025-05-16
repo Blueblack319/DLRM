@@ -1,4 +1,9 @@
-CUDA_VISIBLE_DEVICES=2 python -m torch.distributed.launch --nproc_per_node=1 dlrm_s_pytorch.py \
+DEVICE=$1
+PORT=$2
+
+export MASTER_PORT=$PORT
+
+CUDA_VISIBLE_DEVICES=$DEVICE python -m torch.distributed.launch --nproc_per_node=1 --master_port=$PORT dlrm_s_pytorch.py \
     --arch-sparse-feature-size=16 \
     --arch-mlp-bot="13-512-256-64-16" \
     --arch-mlp-top="512-256-1" \
@@ -10,7 +15,7 @@ CUDA_VISIBLE_DEVICES=2 python -m torch.distributed.launch --nproc_per_node=1 dlr
     --round-targets=True \
     --learning-rate=0.1 \
     --mini-batch-size=128 \
-    --nepochs=2 \
+    --nepochs=1 \
     --print-time \
     --print-freq=1024 \
     --test-freq=1024 \
@@ -19,8 +24,8 @@ CUDA_VISIBLE_DEVICES=2 python -m torch.distributed.launch --nproc_per_node=1 dlr
     --memory-map \
     --use-gpu \
     --dist-backend=nccl \
-    --tensor-board-filename="qr_single_gpu" \
     --qr-flag \
-    --qr-threshold=100 \
+    --qr-threshold=200 \
     --qr-operation=mult \
     --qr-collisions=4 \
+    --tensor-board-filename="qr_single_gpu" 

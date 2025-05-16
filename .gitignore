@@ -138,3 +138,7 @@ dmypy.json
 cython_debug/
 
 data
+run_kaggle_single_gpu
+run_kaggle_single_gpu_backup
+qr_single_gpu
+qr_single_gpu_backup
